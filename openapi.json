@@ -1,0 +1,3306 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Sell to State — Government Contracts Data API",
+    "version": "0.4.0",
+    "summary": "Programmatic, agent-native, and CLI access to normalized government procurement award data. The current award count and country count are on https://selltostate.com. REST, MCP, and the official selltostate CLI stay at parity.",
+    "description": "# Sell to State Data API\n\nProgrammatic access to government procurement award data published on [selltostate.com](https://selltostate.com). The current award count and country count are on that page. This document does not freeze a count. Built for analysts, vendors, and **AI agents**.\n\nThe same data behind the public [selltostate.com](https://selltostate.com) site and the [Explorer](https://app.selltostate.com/explorer), available as JSON, CSV, and an **MCP server** your AI assistant can call directly.\n\n## Base URL\n\n```\nhttps://app.selltostate.com\n```\n\n> The API is served from `https://app.selltostate.com` at the documented paths — use this host today. A dedicated `https://api.selltostate.com` machine-API host is planned for GA but is **not yet deployed** (it currently returns 404); do not target it until it is announced.\n\n## 60-second quickstart\n\n1. Create a free account at [app.selltostate.com](https://app.selltostate.com) and start a subscription (or trial).\n2. Generate an API key under **Account → API keys** (`app.selltostate.com/account/keys`). It is shown **once** — store it.\n3. Call the API:\n\n```bash\ncurl -s https://app.selltostate.com/api/v1/awards?q=cybersecurity&page_size=5 \\\n  -H \"x-api-key: sts_xxxxxxxx\"\n```\n\nWithout an active subscription every data call returns **`402 Payment Required`** with a `payment_link` (and, for agents, a `machine_payment` affordance) — see **Subscriptions & the paywall** below.\n\n## Authentication\n\nTwo credential types, both resolved to one entitlement check:\n\n| Type | Header | Who | Get one |\n|---|---|---|---|\n| **API key** | `x-api-key: sts_…` | Humans / your backend | Dashboard → Account → API keys |\n| **Machine client** | `Authorization: Bearer client:<client_id>` | Autonomous agents | Self-register via DCR (`POST /api/oidc/register`) |\n\n- API keys are `sts_` + 48 hex chars, shown once, stored only as a SHA-256 hash, and revocable from the dashboard.\n- Machine clients self-register with no human in the loop (RFC 7591). A freshly registered client has **zero data scopes** until it subscribes — registration returns a `payment_link`, and the client can also pay autonomously via `POST /api/v1/pay`.\n- A full OAuth 2.1 authorization-code + token flow (the `OAuth2` scheme below) is on the roadmap; today, present the issued `client_id` as `Authorization: Bearer client:<client_id>`.\n\n## Subscriptions & the paywall\n\nData is gated by a single flat subscription (read live pricing at `GET /api/v1/price`). Until the caller's subject (`user:<id>` for a key, `client:<id>` for an agent) is active, **every data endpoint returns `402`**:\n\n```json\n{\n  \"error\": \"payment_required\",\n  \"message\": \"An active subscription is required to access award data.\",\n  \"payment_link\": \"https://app.selltostate.com/checkout\",\n  \"plan\": \"data-monthly\",\n  \"machine_payment\": {\n    \"endpoint\": \"https://app.selltostate.com/api/v1/pay\",\n    \"method\": \"POST\",\n    \"accepts\": [\"payment_method_token\", \"customer\"],\n    \"scopes_granted\": [\"data:read\", \"data:export\"]\n  },\n  \"price\": \"$49/mo\",\n  \"currency\": \"usd\"\n}\n```\n\nThe `402` also carries a header advertising both paths:\n\n```\nWWW-Authenticate: Bearer realm=\"data\", charge=\"…/checkout\", charge_automated=\"…/api/v1/pay\"\n```\n\n- **Humans** open `payment_link` (hosted Stripe Checkout).\n- **Agents** `POST /api/v1/pay` with a Stripe payment-method token and are charged off-session — no browser. On success the agent's very next data call returns `200`.\n\n**Plans & caps:** a 2-day trial is capped at **20 rows** per export/page; a paid plan returns up to **5,000 rows**. v1 entitlement is all-or-nothing — an active subscription grants every data scope.\n\n## Scopes\n\n`data:read` (read awards), `data:export` (CSV export), `data:bulk` (bulk access). In v1 an active subscription grants all three.\n\n## Pagination\n\nList endpoints take `page` (default 1) and `page_size` (default 100; hard-capped by your plan — 20 trial / 5,000 paid). Responses echo `total`, `page`, and `pageSize`.\n\n## Rate limits\n\n- **Data calls:** 120 requests/minute per credential (per API key or machine client; anonymous/`402` traffic is limited per source IP).\n- **Client registration:** 10 registrations/hour per IP.\n\nOver the limit → `429` with a `Retry-After` (seconds) header.\n\n## Using the API from an AI agent (MCP)\n\nThis API is a **Model Context Protocol (MCP) server**. Point any MCP-capable client (Claude Desktop, Claude Code, Cursor, your own agent) at the streamable-HTTP endpoint and it can search and export government awards on its own — including self-registering and paying for access with no human in the loop.\n\n**Endpoint**\n\n```\nhttps://app.selltostate.com/api/mcp\n```\n\n### Connect flow (DCR + OAuth)\n\nThe server advertises its auth the standard way, so spec-compliant clients wire themselves up automatically:\n\n1. **Discover.** The client reads `GET /.well-known/oauth-protected-resource` (RFC 9728) to learn the resource and its authorization server, then `GET /.well-known/oauth-authorization-server` (RFC 8414) for the issuer, endpoints, PKCE support, and scopes (`data:read`, `data:export`, `data:bulk`).\n2. **Register.** With no pre-shared credential, the client self-registers via RFC 7591 Dynamic Client Registration: `POST /api/oidc/register` returns a `client_id` (zero data scopes) plus a `payment_link`.\n3. **Authenticate.** Present the issued client as `Authorization: Bearer client:<client_id>` on every MCP call. (`tools/list` is open and needs no credential; `tools/call` resolves the machine principal.) The full OAuth 2.1 authorization-code + token exchange is on the roadmap; the `Bearer client:<id>` form works today.\n4. **Subscribe.** Until the client's subject is entitled, every `tools/call` returns the same **`402`** body as REST (see *Subscriptions & the paywall*) — carrying both a human `payment_link` and the agent-native `machine_payment` affordance. The agent calls the `pay` tool (`POST /api/v1/pay`) with a Stripe payment-method token, is charged off-session, and its very next `tools/call` returns data.\n\n### Tool catalog\n\n`tools/list` returns **26 tools** (as of 0.4.0), each mirroring a REST endpoint 1:1 — search, entity detail, faceted search, lists, and saved searches — plus the autonomous `pay` tool. The full catalog (name · scope · REST endpoint · `requires_user_key`) is the machine-readable **`x-mcp-tools`** extension on this document; treat that as the source of truth. Highlights: `whoami` (ungated self-introspection), `search` (faceted), `get_buyer`/`get_supplier_detail`/`get_sector`/`get_tender` (entity detail; `get_buyer_detail` is a back-compat alias of `get_buyer`), and the owner-scoped `*_list`/`*_saved_search` tools that require a user `x-api-key` (an OIDC client token gets a `requires_user_key` result, mirroring the REST `403`).\n\n### Raw JSON-RPC (manual test)\n\nList the tools (open, no auth):\n\n```bash\ncurl -s https://app.selltostate.com/api/mcp \\\n  -H \"content-type: application/json\" \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'\n```\n\nCall a tool (needs an entitled principal, else `402`):\n\n```bash\ncurl -s https://app.selltostate.com/api/mcp \\\n  -H \"content-type: application/json\" \\\n  -H \"Authorization: Bearer client:<client_id>\" \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"search_awards\",\"arguments\":{\"q\":\"cybersecurity\",\"year\":2024}}}'\n```\n\n### Example agent prompts\n\nOnce the connector is attached, a user can simply ask:\n\n- *\"Search Sell to State for cybersecurity awards in 2024 over S$1M and summarise the top 5 suppliers.\"*\n- *\"Use the Sell to State tools to pull every award won by the Ministry of Education this year and export them as CSV.\"*\n- *\"Which suppliers does a government buyer purchase construction services from? Use get_agency on the relevant buyer.\"*\n\nIf the agent hits a `402`, the affordance is self-explanatory: it can present the `payment_link` to the user, or — when authorised to spend — call `pay` and continue without interruption.\n\n## Data notes\n\nAward amounts are in their **local award currency**. The subscription **price** is in USD. `description` is the tender description, truncated to 240 chars in list/JSON responses.\n\n## Support\n\n[support@selltostate.com](mailto:support@selltostate.com) · status & changelog below.\n\n---\n\n## What's new in 0.4.0 — REST · MCP · CLI parity\n\n0.4.0 closes the gap between the three machine surfaces so **every capability is reachable the same way from REST, the MCP server, and the official CLI** (`@data-atlas/cli` → the `selltostate` binary). Same auth (`x-api-key` or `Bearer client:<id>`), same paywall, same entitlement caps.\n\n### New REST endpoints (all under `/api/v1`, same machine paywall as `/awards`)\n\n| Endpoint | Returns |\n|---|---|\n| `GET /api/v1/whoami` | Self-introspection: `{subject, type, active, plan, scopes, export_cap}`. **No 402** — a valid-but-unentitled key returns `200` with `active:false` so an agent can decide to pay *before* doing work. Missing credential → `401`. |\n| `GET /api/v1/search` | Faceted full-text (Typesense) search over one `scope` (`tenders\\|buyers\\|suppliers\\|sectors`): `{hits, found, page, per_page, facets}`. Search-budget rate limit (300/min). |\n| `GET /api/v1/buyers` · `GET /api/v1/buyers/{slug}` | Top buyers by spend · buyer detail (summary, yearly trend, sector breakdown, top suppliers). |\n| `GET /api/v1/suppliers` · `GET /api/v1/suppliers/{slug}` | Top suppliers by awarded total · supplier detail (summary, yearly trend, sectors, top buyers). |\n| `GET /api/v1/sectors` · `GET /api/v1/sectors/{slug}` | Curated sector taxonomy · sector detail (summary, yearly trend, active partners via `?kind=buyers\\|suppliers`). |\n| `GET /api/v1/tenders/{id}` | Single award by numeric `award_id` **or** public tender page id, with related awards. |\n| `GET/POST /api/v1/lists` · `GET/PATCH/DELETE /api/v1/lists/{id}` · `POST/DELETE /api/v1/lists/{id}/items` | Saved award **lists** CRUD. **Owner-scoped: requires an `x-api-key` (user) credential** — OIDC client tokens get `403` (a list belongs to a real user). |\n| `GET/POST /api/v1/saved-searches` · `GET/PATCH/DELETE /api/v1/saved-searches/{id}` | Saved **searches** CRUD. Same owner-scoped rule as lists. |\n\nEntity-detail and partner tables are capped to your plan's row cap on trial keys (`table_cap` echoes the applied cap).\n\n### MCP tool catalog (24 tools — `x-mcp-tools` on this document is the machine-readable source of truth)\n\nEvery REST capability above has a matching MCP tool. `get_buyer` is canonical; `get_buyer_detail` is a kept back-compat alias. Lists/saved-searches tools require a user `x-api-key` (an OIDC client gets a `forbidden`/`requires_user_key` result, mirroring the REST `403`). `whoami` is ungated.\n\n### Official CLI — `selltostate`\n\nThe `selltostate` binary is the official CLI. Clone https://github.com/getbeton/selltostate-cli (it is not on npm). It is a thin wrapper over this exact REST surface, 1:1 per command, with `--format table|json|csv`. Authenticate once with `selltostate auth login` (stores an `x-api-key` at `~/.config/selltostate/config.json`, mode `0600`) or pass `STS_API_KEY`. See the `x-cli` extension on this document for the full command map, and the [CLI page](https://selltostate.com/cli/) on the marketing site.\n\n```bash\nselltostate auth login                 # verify + persist your x-api-key via /whoami\nselltostate whoami                     # {subject, active, plan, scopes, export_cap}\nselltostate search \"cybersecurity\" --scope tenders --year-min 2023\nselltostate get buyer ministry-of-education\nselltostate export --supplier ACME -o awards.csv\n```\n",
+    "termsOfService": "https://selltostate.com/terms/",
+    "contact": {
+      "name": "Sell to State",
+      "url": "https://selltostate.com",
+      "email": "support@selltostate.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://app.selltostate.com",
+      "description": "Primary API host (live) — the application serves the full REST + MCP + OAuth/OIDC surface here at the documented paths."
+    },
+    {
+      "url": "https://api.selltostate.com",
+      "description": "Dedicated machine-API host (GA, coming soon) — not yet deployed; do not target until announced. Use https://app.selltostate.com today."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Data",
+      "description": "Search and export awarded government tenders. Requires an active subscription (else 402)."
+    },
+    {
+      "name": "Billing",
+      "description": "Live pricing and autonomous (agent) payment."
+    },
+    {
+      "name": "Agents & MCP",
+      "description": "Self-registration (DCR) and the MCP-over-HTTP tool server for AI agents."
+    },
+    {
+      "name": "Discovery",
+      "description": "OAuth/MCP discovery metadata (RFC 9728 / RFC 8414)."
+    },
+    {
+      "name": "Lists",
+      "description": "Saved award lists CRUD. Owner-scoped — requires a user x-api-key (OIDC clients get 403)."
+    },
+    {
+      "name": "Saved Searches",
+      "description": "Saved search CRUD. Owner-scoped — requires a user x-api-key (OIDC clients get 403)."
+    }
+  ],
+  "security": [
+    {
+      "ApiKey": []
+    },
+    {
+      "MachineClient": []
+    }
+  ],
+  "paths": {
+    "/api/v1/awards": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "searchAwards",
+        "summary": "Search awarded government tenders",
+        "description": "Paginated, filterable query over the full GeBIZ award set, ordered by awarded amount (desc). Requires an active subscription — otherwise returns `402` with a payment link. Row count per page is capped by your plan (20 trial / 5,000 paid).\n\n**Note:** `amount_max` is honored by the MCP `search_awards`/`export` tools; the REST endpoint currently filters on `amount_min` only (`amount_max` parity fix pending GA).",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Full-text match on tender description (ILIKE).",
+            "schema": {
+              "type": "string"
+            },
+            "example": "cybersecurity"
+          },
+          {
+            "name": "agency",
+            "in": "query",
+            "description": "Buyer agency — exact slug or partial display-name match.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "singapore-lta-procurement"
+          },
+          {
+            "name": "supplier",
+            "in": "query",
+            "description": "Winning supplier — partial display-name match.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Category slug (exact).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Award year (YYYY).",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 2024
+          },
+          {
+            "name": "amount_min",
+            "in": "query",
+            "description": "Minimum awarded amount (in the award's local currency).",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "amount_max",
+            "in": "query",
+            "description": "Maximum awarded amount. MCP tools only today (see note).",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "1-based page number.",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "description": "Rows per page (capped by plan).",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated awards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardsResponse"
+                },
+                "example": {
+                  "rows": [
+                    {
+                      "tender_no": "MOE000ETT24300001",
+                      "supplier": "ACME Engineering Pte Ltd",
+                      "agency": "Ministry of Education",
+                      "category": "Construction & Renovation",
+                      "awarded_amt": 4820000,
+                      "published_at": "2024-06-01",
+                      "awarded_at": "2024-07-12",
+                      "description": "Addition and alteration works to school premises including M&E services"
+                    }
+                  ],
+                  "total": 17825,
+                  "page": 1,
+                  "pageSize": 100,
+                  "export_cap": 5000
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "curl",
+            "label": "cURL",
+            "source": "curl -s \"https://app.selltostate.com/api/v1/awards?q=cybersecurity&page_size=5\" \\\n  -H \"x-api-key: sts_xxxxxxxx\""
+          },
+          {
+            "lang": "python",
+            "label": "Python",
+            "source": "import requests\n\nresp = requests.get(\n    \"https://app.selltostate.com/api/v1/awards\",\n    params={\"q\": \"cybersecurity\", \"page_size\": 5},\n    headers={\"x-api-key\": \"sts_xxxxxxxx\"},\n)\nresp.raise_for_status()  # 402 here means no active subscription\ndata = resp.json()\nprint(data[\"total\"], \"awards;\", len(data[\"rows\"]), \"on this page\")\nfor award in data[\"rows\"]:\n    print(award[\"supplier\"], \"—\", award[\"awarded_amt\"])"
+          },
+          {
+            "lang": "javascript",
+            "label": "JavaScript",
+            "source": "const url = new URL(\"https://app.selltostate.com/api/v1/awards\");\nurl.search = new URLSearchParams({ q: \"cybersecurity\", page_size: \"5\" });\n\nconst resp = await fetch(url, {\n  headers: { \"x-api-key\": \"sts_xxxxxxxx\" },\n});\nif (resp.status === 402) throw new Error(\"subscription required\");\nconst data = await resp.json();\nconsole.log(`${data.total} awards; ${data.rows.length} on this page`);"
+          },
+          {
+            "lang": "go",
+            "label": "Go",
+            "source": "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"net/http\"\n)\n\nfunc main() {\n\treq, _ := http.NewRequest(\"GET\", \"https://app.selltostate.com/api/v1/awards?q=cybersecurity&page_size=5\", nil)\n\treq.Header.Set(\"x-api-key\", \"sts_xxxxxxxx\")\n\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer resp.Body.Close()\n\tif resp.StatusCode == http.StatusPaymentRequired {\n\t\tpanic(\"subscription required (402)\")\n\t}\n\n\tvar out struct {\n\t\tTotal int `json:\"total\"`\n\t\tRows  []map[string]any `json:\"rows\"`\n\t}\n\tjson.NewDecoder(resp.Body).Decode(&out)\n\tfmt.Printf(\"%d awards; %d on this page\\n\", out.Total, len(out.Rows))\n}"
+          }
+        ]
+      }
+    },
+    "/api/v1/awards.csv": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "exportAwardsCsv",
+        "summary": "Export awarded tenders as CSV",
+        "description": "Same filters as `searchAwards`, returned as `text/csv` (attachment `selltostate-awards.csv`). Columns: `tender_no,supplier,agency,category,awarded_amt,published_at,awarded_at,description`. Row count capped by plan (20 trial / 5,000 paid). Requires an active subscription; un-entitled callers are redirected to `/checkout`.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "OAuth2": [
+              "data:export"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agency",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supplier",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "amount_min",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV stream.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "tender_no,supplier,agency,category,awarded_amt,published_at,awarded_at,description\n\"MOE000ETT24300001\",\"ACME Engineering Pte Ltd\",\"Ministry of Education\",\"Construction & Renovation\",\"4820000\",\"2024-06-01\",\"2024-07-12\",\"Addition and alteration works...\""
+              }
+            }
+          },
+          "303": {
+            "description": "Not entitled / unauthenticated — redirect to `/checkout` or `/auth`."
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/v1/price": {
+      "get": {
+        "tags": [
+          "Billing"
+        ],
+        "operationId": "getPrice",
+        "summary": "Live subscription price",
+        "description": "Public. Returns the active Stripe subscription price (USD), resolved live by lookup key, with a graceful fallback if Stripe is unreachable. No auth required.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Active price.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Price"
+                },
+                "example": {
+                  "unit_amount": 4900,
+                  "currency": "usd",
+                  "interval": "month",
+                  "formatted": "$49/mo",
+                  "live": true
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "curl",
+            "label": "cURL",
+            "source": "curl -s \"https://app.selltostate.com/api/v1/price\""
+          },
+          {
+            "lang": "python",
+            "label": "Python",
+            "source": "import requests\n\nprice = requests.get(\"https://app.selltostate.com/api/v1/price\").json()\nprint(price[\"formatted\"], \"(\", price[\"currency\"], \")\")"
+          },
+          {
+            "lang": "javascript",
+            "label": "JavaScript",
+            "source": "const price = await fetch(\"https://app.selltostate.com/api/v1/price\").then((r) => r.json());\nconsole.log(`${price.formatted} (${price.currency})`);"
+          },
+          {
+            "lang": "go",
+            "label": "Go",
+            "source": "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"net/http\"\n)\n\nfunc main() {\n\tresp, err := http.Get(\"https://app.selltostate.com/api/v1/price\")\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer resp.Body.Close()\n\n\tvar price struct {\n\t\tFormatted string `json:\"formatted\"`\n\t\tCurrency  string `json:\"currency\"`\n\t}\n\tjson.NewDecoder(resp.Body).Decode(&price)\n\tfmt.Printf(\"%s (%s)\\n\", price.Formatted, price.Currency)\n}"
+          }
+        ]
+      }
+    },
+    "/api/v1/pay": {
+      "post": {
+        "tags": [
+          "Billing"
+        ],
+        "operationId": "payAutonomously",
+        "summary": "Activate a subscription autonomously (agent payment)",
+        "description": "Agent-native payment. Present a Stripe payment-method token (`pm_…`) or an existing `customer` (`cus_…`) you control; the subscription is created server-side, off-session — no hosted Checkout page. On success the caller's subject-keyed entitlement flips active and the next data call returns `200`. A decline returns `402` (retryable) echoing `decline_code` and the same `machine_payment` affordance. Requires a machine credential (API key or `Bearer client:`).",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayRequest"
+              },
+              "example": {
+                "payment_method_token": "pm_1Pxxxxxxxxxxxx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Subscription active/trialing; scopes granted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayResponse"
+                },
+                "example": {
+                  "status": "active",
+                  "scopes": [
+                    "data:read",
+                    "data:export"
+                  ],
+                  "principal": {
+                    "type": "client",
+                    "id": "c_abc123"
+                  },
+                  "subject": "client:c_abc123",
+                  "customer": "cus_Xxxx",
+                  "subscription": "sub_Xxxx"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No machine credential presented.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "message": "Present a Bearer client:<id> token or an x-api-key."
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentDeclined"
+          }
+        }
+      }
+    },
+    "/api/oidc/register": {
+      "post": {
+        "tags": [
+          "Agents & MCP"
+        ],
+        "operationId": "registerClient",
+        "summary": "Dynamic Client Registration (RFC 7591)",
+        "description": "Autonomous, zero-scope client registration for agents. Returns client credentials with **no data scopes** plus a `payment_link` whose Checkout activates exactly this client. Rate-limited 10/hour/IP. After paying (hosted link or `POST /api/v1/pay`), present `Authorization: Bearer client:<client_id>` on data calls.",
+        "security": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DcrRequest"
+              },
+              "example": {
+                "client_name": "My Procurement Agent",
+                "redirect_uris": [
+                  "https://myagent.example/callback"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Client credentials + payment link.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrResponse"
+                },
+                "example": {
+                  "client_id": "c_abc123",
+                  "client_secret": "cs_live_xxx",
+                  "client_id_issued_at": 1733600000,
+                  "client_secret_expires_at": 0,
+                  "redirect_uris": [
+                    "https://myagent.example/callback"
+                  ],
+                  "grant_types": [
+                    "authorization_code",
+                    "client_credentials"
+                  ],
+                  "token_endpoint_auth_method": "client_secret_basic",
+                  "scope": "",
+                  "payment_link": "https://app.selltostate.com/checkout?..."
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/mcp": {
+      "post": {
+        "tags": [
+          "Agents & MCP"
+        ],
+        "operationId": "mcp",
+        "summary": "MCP-over-HTTP (JSON-RPC 2.0)",
+        "description": "Model Context Protocol server. Methods: `tools/list` (open catalog) and `tools/call` (gated by subscription). `tools/call` resolves the machine principal (`x-api-key` or `Bearer client:`) and returns `402` if missing or un-entitled. As of 0.4.0 the catalog is **26 tools** at full REST parity (search, entity detail, faceted search, lists, saved searches) — owner-scoped list/saved-search tools require a user `x-api-key`. See `x-mcp-tools` for the catalog.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpRequest"
+              },
+              "examples": {
+                "list": {
+                  "summary": "List tools",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                  }
+                },
+                "call": {
+                  "summary": "Call search_awards",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                      "name": "search_awards",
+                      "arguments": {
+                        "q": "cloud",
+                        "year": 2024
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown JSON-RPC method (`-32601`)."
+          },
+          "402": {
+            "description": "Payment required (JSON-RPC error, code 402)."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "tags": [
+          "Discovery"
+        ],
+        "operationId": "protectedResourceMetadata",
+        "summary": "Protected Resource Metadata (RFC 9728)",
+        "description": "Tells MCP/OAuth clients which authorization server and scopes apply to this resource. Origin-relative.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Resource metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtectedResourceMetadata"
+                },
+                "example": {
+                  "resource": "https://app.selltostate.com",
+                  "authorization_servers": [
+                    "https://app.selltostate.com"
+                  ],
+                  "scopes_supported": [
+                    "data:read",
+                    "data:export",
+                    "data:bulk"
+                  ],
+                  "bearer_methods_supported": [
+                    "header"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-authorization-server": {
+      "get": {
+        "tags": [
+          "Discovery"
+        ],
+        "operationId": "authorizationServerMetadata",
+        "summary": "Authorization Server Metadata (RFC 8414)",
+        "description": "Issuer, registration/authorize/token/jwks endpoints, PKCE methods, and supported scopes. The token endpoint implements the authorization_code + refresh_token grants (PKCE mandatory); there is no client_credentials token grant today — autonomous agents use the `Authorization: Bearer client:<client_id>` machine shim returned by DCR.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Authorization server metadata."
+          }
+        }
+      }
+    },
+    "/api/v1/whoami": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "whoami",
+        "summary": "Self-introspection — auth, entitlement & scopes",
+        "description": "Resolve the *calling* credential's identity, entitlement and granted scopes. **Deliberately different from the data paywall:** a valid-but-unentitled credential returns `200` with `active:false` (so an agent/CLI can decide to pay *before* doing work); a missing/invalid credential returns `401` (not `402`). Granted scopes are all data scopes when active, else empty (v1 is all-or-nothing). Shares the standard 120/min per-caller rate limit.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Caller identity + entitlement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                },
+                "example": {
+                  "subject": "user:u_abc",
+                  "type": "user",
+                  "active": true,
+                  "plan": "data-monthly",
+                  "scopes": [
+                    "data:read",
+                    "data:export",
+                    "data:bulk"
+                  ],
+                  "export_cap": 5000
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid machine credential presented.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "detail": "Present an x-api-key or Authorization: Bearer client:<id>."
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "curl",
+            "label": "cURL",
+            "source": "curl -s https://app.selltostate.com/api/v1/whoami \\\n  -H \"x-api-key: sts_xxxxxxxx\""
+          },
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate whoami            # uses the stored key\nselltostate whoami --json     # raw JSON"
+          }
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "search",
+        "summary": "Faceted full-text search (one collection)",
+        "description": "Faceted Typesense search over a single `scope` collection. Returns hits, total `found`, pagination, and `facets` (counts per facet value). Uses the **search budget** rate limit (300/min) shared with the public `/api/search` route. Behind the same machine paywall as `/awards` — no human-session fallback.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Collection: tenders | buyers | suppliers | sectors (default tenders).",
+            "example": "tenders"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Full-text query.",
+            "example": "cybersecurity"
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "ISO country filter (multi-country instances)."
+          },
+          {
+            "name": "sector",
+            "in": "query",
+            "description": "Sector slug (repeatable).",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Record type filter (scope-dependent)."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Status filter (scope-dependent)."
+          },
+          {
+            "name": "year_min",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Earliest award year."
+          },
+          {
+            "name": "year_max",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Latest award year."
+          },
+          {
+            "name": "amount_min",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Minimum amount."
+          },
+          {
+            "name": "amount_max",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Maximum amount."
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "1-based page (default 1)."
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Hits per page (≤ 50)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hits + facets + pagination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResult"
+                },
+                "example": {
+                  "hits": [
+                    {
+                      "id": "buyer:ministry-of-education",
+                      "name": "Ministry of Education"
+                    }
+                  ],
+                  "found": 137,
+                  "page": 1,
+                  "per_page": 20,
+                  "facets": {
+                    "sector": [
+                      {
+                        "value": "construction",
+                        "count": 42
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "curl",
+            "label": "cURL",
+            "source": "curl -s \"https://app.selltostate.com/api/v1/search?scope=tenders&q=cybersecurity&year_min=2023\" \\\n  -H \"x-api-key: sts_xxxxxxxx\""
+          },
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate search \"cybersecurity\" --scope tenders --year-min 2023 --per-page 20"
+          }
+        ]
+      }
+    },
+    "/api/v1/buyers": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "listBuyers",
+        "summary": "Top buyers by spend",
+        "description": "Top buying agencies ranked by total awarded spend. `?limit` (default 50, max 500). Trial keys are row-capped (`table_cap`).",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Rows to return (default 50, max 500).",
+            "example": 50
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{rows, limit, table_cap}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityListResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate buyers --limit 25"
+          }
+        ]
+      }
+    },
+    "/api/v1/buyers/{slug}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "getBuyer",
+        "summary": "Buyer (agency) detail",
+        "description": "Full buyer profile: header summary, yearly spend trend, sector breakdown, and a paginated top-suppliers table (`?sup_page`). `404` when the slug is unknown.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Buyer slug, e.g. ministry-of-education."
+          },
+          {
+            "name": "sup_page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Top-suppliers page (1-based)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{buyer, yearly, sectors, suppliers, table_cap}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuyerDetail"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate get buyer ministry-of-education"
+          }
+        ]
+      }
+    },
+    "/api/v1/suppliers": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "listSuppliers",
+        "summary": "Top suppliers by awarded total",
+        "description": "Top suppliers ranked by total awarded value. `?limit` (default 50, max 500). Trial keys are row-capped.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Rows to return (default 50, max 500).",
+            "example": 50
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{rows, limit, table_cap}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityListResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate suppliers --limit 25"
+          }
+        ]
+      }
+    },
+    "/api/v1/suppliers/{slug}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "getSupplier",
+        "summary": "Supplier detail",
+        "description": "Full supplier profile: header summary, yearly awarded trend, sector breakdown, and a paginated top-buyers table (`?buyer_page`). `404` when the slug is unknown.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Supplier slug."
+          },
+          {
+            "name": "buyer_page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Top-buyers page (1-based)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{supplier, yearly, sectors, buyers, table_cap}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierDetail"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate get supplier acme-engineering-pte-ltd"
+          }
+        ]
+      }
+    },
+    "/api/v1/sectors": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "listSectors",
+        "summary": "Sector taxonomy",
+        "description": "The curated sector taxonomy (slug + name). Small reference list — no row cap.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{rows, total}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SectorListResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate sectors"
+          }
+        ]
+      }
+    },
+    "/api/v1/sectors/{slug}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "getSector",
+        "summary": "Sector detail",
+        "description": "Sector profile: header summary, yearly trend, and active partners. `?kind=buyers|suppliers` (default buyers) selects the partner table; `?page` paginates it. `404` when the slug is unknown.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sector slug."
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Partner table: buyers | suppliers (default buyers).",
+            "example": "buyers"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Partner table page (1-based)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{sector, yearly, partners, table_cap}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SectorDetail"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate get sector construction-renovation --kind suppliers"
+          }
+        ]
+      }
+    },
+    "/api/v1/tenders/{id}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "operationId": "getTender",
+        "summary": "Single award (tender) detail",
+        "description": "One award resolved by **numeric `award_id` OR public tender page id**, plus related awards (same tender / same buyer). Related lists are pre-capped; no trial row cap applies. `404` when unknown.",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "MachineClient": []
+          },
+          {
+            "OAuth2": [
+              "data:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Numeric award_id or public tender page id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{tender, related}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenderDetail"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate get tender MOE000ETT24300001"
+          }
+        ]
+      }
+    },
+    "/api/v1/lists": {
+      "get": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "getLists",
+        "summary": "List saved award lists",
+        "description": "Every saved award list the caller can see. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{lists}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedListsResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists ls"
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "createList",
+        "summary": "Create a saved list",
+        "description": "Create a personal saved award list. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateListRequest"
+              },
+              "example": {
+                "name": "Cyber FY24 targets"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "{id, name}",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "lst_abc",
+                  "name": "Cyber FY24 targets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "name required"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists create \"Cyber FY24 targets\""
+          }
+        ]
+      }
+    },
+    "/api/v1/lists/{id}": {
+      "get": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "getList",
+        "summary": "Get a saved list + items",
+        "description": "One list with its items joined to award data (paginated `?page`/`?page_size`, ≤100). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "List id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "1-based page.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "description": "Items per page (≤100).",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{list, items, total, page, page_size}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedListDetail"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists show lst_abc"
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "renameList",
+        "summary": "Rename a saved list",
+        "description": "Rename a list (creator or workspace owner). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "List id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              },
+              "example": {
+                "name": "Renamed list"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{id, name}"
+          },
+          "400": {
+            "description": "name required"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists rename lst_abc \"Renamed list\""
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "deleteList",
+        "summary": "Delete a saved list",
+        "description": "Delete a list and its items. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "List id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{deleted, id}"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists delete lst_abc"
+          }
+        ]
+      }
+    },
+    "/api/v1/lists/{id}/items": {
+      "post": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "addToList",
+        "summary": "Add a tender to a list",
+        "description": "Add a tender by `tender_no` **or** `award_id`. Idempotent. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "List id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddItemRequest"
+              },
+              "example": {
+                "tender_no": "MOE000ETT24300001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "{list_id, tender_no}"
+          },
+          "400": {
+            "description": "tender_no or award_id required"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists add lst_abc --tender MOE000ETT24300001"
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Lists"
+        ],
+        "operationId": "removeFromList",
+        "summary": "Remove a tender from a list",
+        "description": "Remove a tender by `tender_no`. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "List id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveItemRequest"
+              },
+              "example": {
+                "tender_no": "MOE000ETT24300001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{list_id, removed}"
+          },
+          "400": {
+            "description": "tender_no required"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate lists rm lst_abc --tender MOE000ETT24300001"
+          }
+        ]
+      }
+    },
+    "/api/v1/saved-searches": {
+      "get": {
+        "tags": [
+          "Saved Searches"
+        ],
+        "operationId": "getSavedSearches",
+        "summary": "List saved searches",
+        "description": "Every saved search the caller can see (personal ∪ workspaces). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{searches}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedSearchesResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate saved-searches ls"
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Saved Searches"
+        ],
+        "operationId": "saveSearch",
+        "summary": "Save a search",
+        "description": "Persist a search under a name. `kind:\"atlas\"` normalizes to the unified-search shape; a legacy Explorer filter set is stored as-is. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSearchRequest"
+              },
+              "example": {
+                "name": "Cyber 2024",
+                "kind": "atlas",
+                "query": {
+                  "scope": "tenders",
+                  "q": "cybersecurity",
+                  "year_min": 2024
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "{id, name}"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate saved-searches save \"Cyber 2024\" --query '{\"scope\":\"tenders\",\"q\":\"cybersecurity\",\"year_min\":2024}' --atlas"
+          }
+        ]
+      }
+    },
+    "/api/v1/saved-searches/{id}": {
+      "get": {
+        "tags": [
+          "Saved Searches"
+        ],
+        "operationId": "getSavedSearch",
+        "summary": "Get a saved search",
+        "description": "One saved search by id (visible to caller, else `404`). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Saved-search id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{search}"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate saved-searches show ss_abc"
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Saved Searches"
+        ],
+        "operationId": "renameSavedSearch",
+        "summary": "Rename a saved search",
+        "description": "Rename a saved search (creator or workspace owner). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Saved-search id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              },
+              "example": {
+                "name": "Renamed search"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{id, name}"
+          },
+          "400": {
+            "description": "name required"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate saved-searches rename ss_abc \"Renamed search\""
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Saved Searches"
+        ],
+        "operationId": "deleteSavedSearch",
+        "summary": "Delete a saved search",
+        "description": "Delete a saved search. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Saved-search id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{deleted, id}"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "cli",
+            "label": "selltostate CLI",
+            "source": "selltostate saved-searches delete ss_abc"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Dashboard-issued key (`sts_` + 48 hex). Create at app.selltostate.com/account/keys."
+      },
+      "MachineClient": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "client:<client_id>",
+        "description": "Self-registered agent. Present the DCR-issued client id as `Authorization: Bearer client:<client_id>`. (Full OAuth bearer tokens are on the roadmap.)"
+      },
+      "OAuth2": {
+        "type": "oauth2",
+        "description": "Roadmap — full OAuth 2.1 authorization-code flow. Use ApiKey or MachineClient today.",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://app.selltostate.com/api/auth/mcp/authorize",
+            "tokenUrl": "https://app.selltostate.com/api/auth/mcp/token",
+            "scopes": {
+              "data:read": "Read awards",
+              "data:export": "Export CSV",
+              "data:bulk": "Bulk access"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "PaymentRequired": {
+        "description": "No active subscription. Body carries `payment_link` (human) and `machine_payment` (agent). Header advertises both via `WWW-Authenticate`.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bearer realm=\"data\", charge=\"…/checkout\", charge_automated=\"…/api/v1/pay\""
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PaymentRequired"
+            }
+          }
+        }
+      },
+      "PaymentDeclined": {
+        "description": "Payment not completed (declined / SCA-required / no method). Retryable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PaymentDeclined"
+            },
+            "example": {
+              "error": "payment_required",
+              "message": "Payment was not completed.",
+              "payment_link": "https://app.selltostate.com/checkout",
+              "plan": "data-monthly",
+              "machine_payment": {
+                "endpoint": "https://app.selltostate.com/api/v1/pay",
+                "method": "POST",
+                "accepts": [
+                  "payment_method_token",
+                  "customer"
+                ],
+                "scopes_granted": [
+                  "data:read",
+                  "data:export"
+                ]
+              },
+              "retryable": true,
+              "reason": "card_declined",
+              "decline_code": "insufficient_funds"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Too many requests. Retry after the `Retry-After` (seconds) header.",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Seconds to wait."
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": "rate_limited",
+              "message": "Too many requests. Slow down and retry."
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found (unknown id/slug, or a foreign owner-scoped id — never leaks existence).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": "not_found"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Owner-scoped surface called with an OIDC client (`Bearer client:`) token instead of a user `x-api-key`.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": "forbidden",
+              "message": "This endpoint requires a user API key."
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Award": {
+        "type": "object",
+        "description": "One awarded GeBIZ tender.",
+        "properties": {
+          "tender_no": {
+            "type": "string",
+            "description": "GeBIZ tender reference."
+          },
+          "supplier": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Winning supplier display name."
+          },
+          "agency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Buyer agency display name."
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Category name."
+          },
+          "awarded_amt": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Awarded amount in the award's local currency (SGD for Singapore)."
+          },
+          "published_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Notice published date (UTC calendar day)."
+          },
+          "awarded_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Award decision date (UTC calendar day). Null on open notices."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tender description (truncated to 240 chars in list responses)."
+          }
+        }
+      },
+      "AwardsResponse": {
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total matching awards (ignores paging)."
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "Effective page size after plan capping."
+          },
+          "export_cap": {
+            "type": "integer",
+            "description": "Plan row cap (20 trial / 5,000 paid). Present on key/session responses."
+          }
+        },
+        "required": [
+          "rows",
+          "total",
+          "page",
+          "pageSize"
+        ]
+      },
+      "Price": {
+        "type": "object",
+        "properties": {
+          "unit_amount": {
+            "type": "integer",
+            "description": "Price in cents."
+          },
+          "currency": {
+            "type": "string",
+            "example": "usd"
+          },
+          "interval": {
+            "type": "string",
+            "enum": [
+              "month",
+              "year"
+            ],
+            "example": "month"
+          },
+          "formatted": {
+            "type": "string",
+            "example": "$49/mo"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "true if read from Stripe, false if fallback."
+          }
+        }
+      },
+      "MachinePaymentAffordance": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "example": "https://app.selltostate.com/api/v1/pay"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "POST"
+            ]
+          },
+          "accepts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "payment_method_token",
+              "customer"
+            ]
+          },
+          "scopes_granted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "data:read",
+              "data:export"
+            ]
+          }
+        }
+      },
+      "PaymentRequired": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "payment_required"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "payment_link": {
+            "type": "string",
+            "description": "Hosted Stripe Checkout URL (human path)."
+          },
+          "plan": {
+            "type": "string",
+            "example": "data-monthly"
+          },
+          "machine_payment": {
+            "$ref": "#/components/schemas/MachinePaymentAffordance"
+          },
+          "price": {
+            "type": "string",
+            "description": "Human-display price, e.g. $49/mo (when available)."
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message",
+          "payment_link",
+          "plan",
+          "machine_payment"
+        ]
+      },
+      "PaymentDeclined": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PaymentRequired"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "retryable": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string",
+                "example": "card_declined"
+              },
+              "decline_code": {
+                "type": "string",
+                "example": "insufficient_funds"
+              }
+            }
+          }
+        ]
+      },
+      "PayRequest": {
+        "type": "object",
+        "description": "Provide one of the two.",
+        "properties": {
+          "payment_method_token": {
+            "type": "string",
+            "description": "A Stripe PaymentMethod (pm_…) you control."
+          },
+          "customer": {
+            "type": "string",
+            "description": "An existing Stripe customer (cus_…) you control."
+          }
+        }
+      },
+      "PayResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "active"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "principal": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "client",
+                  "user"
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            }
+          },
+          "subject": {
+            "type": "string",
+            "example": "client:c_abc123"
+          },
+          "customer": {
+            "type": "string"
+          },
+          "subscription": {
+            "type": "string"
+          }
+        }
+      },
+      "DcrRequest": {
+        "type": "object",
+        "properties": {
+          "client_name": {
+            "type": "string"
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "software_id": {
+            "type": "string"
+          },
+          "software_statement": {
+            "type": "string"
+          }
+        }
+      },
+      "DcrResponse": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "client_id_issued_at": {
+            "type": "integer"
+          },
+          "client_secret_expires_at": {
+            "type": "integer",
+            "description": "0 = does not expire."
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "grant_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_endpoint_auth_method": {
+            "type": "string",
+            "example": "client_secret_basic"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Empty until subscribed (paywall)."
+          },
+          "payment_link": {
+            "type": "string"
+          }
+        }
+      },
+      "ProtectedResourceMetadata": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "authorization_servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scopes_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bearer_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "McpRequest": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "enum": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ]
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "tools/list",
+              "tools/call"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "McpResult": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "enum": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ]
+          },
+          "result": {
+            "type": "object"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "data": {}
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "WhoAmI": {
+        "description": "Caller identity, entitlement, and granted scopes (GET /api/v1/whoami).",
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "user:<id> or client:<id>."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "user",
+              "client"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the subject has an active subscription."
+          },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "export_cap": {
+            "type": "integer",
+            "description": "Row cap for this plan (20 trial / 5,000 paid)."
+          }
+        },
+        "required": [
+          "subject",
+          "type",
+          "active",
+          "scopes"
+        ]
+      },
+      "SearchResult": {
+        "description": "Faceted search result (GET /api/v1/search).",
+        "type": "object",
+        "properties": {
+          "hits": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "found": {
+            "type": "integer",
+            "description": "Total matches (ignores paging)."
+          },
+          "page": {
+            "type": "integer"
+          },
+          "per_page": {
+            "type": "integer"
+          },
+          "facets": {
+            "type": "object",
+            "description": "Per-facet value→count buckets."
+          },
+          "unavailable": {
+            "type": "boolean",
+            "description": "true if the search backend is degraded."
+          }
+        },
+        "required": [
+          "hits",
+          "found",
+          "page",
+          "per_page"
+        ]
+      },
+      "EntityRow": {
+        "description": "A buyer or supplier summary row in a top-N list.",
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_amount": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "award_count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "EntityListResponse": {
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntityRow"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "table_cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Applied trial row cap, else null."
+          }
+        },
+        "required": [
+          "rows"
+        ]
+      },
+      "Sector": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SectorListResponse": {
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Sector"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows",
+          "total"
+        ]
+      },
+      "YearlyPoint": {
+        "description": "One year of the spend/awarded trend.",
+        "type": "object",
+        "properties": {
+          "year": {
+            "type": "integer"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      },
+      "Paginated": {
+        "description": "A paginated partner table (suppliers/buyers/partners).",
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
+          }
+        }
+      },
+      "BuyerDetail": {
+        "description": "Buyer (agency) detail (GET /api/v1/buyers/{slug}).",
+        "type": "object",
+        "properties": {
+          "buyer": {
+            "type": "object"
+          },
+          "yearly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyPoint"
+            }
+          },
+          "sectors": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "suppliers": {
+            "$ref": "#/components/schemas/Paginated"
+          },
+          "table_cap": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "buyer"
+        ]
+      },
+      "SupplierDetail": {
+        "description": "Supplier detail (GET /api/v1/suppliers/{slug}).",
+        "type": "object",
+        "properties": {
+          "supplier": {
+            "type": "object"
+          },
+          "yearly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyPoint"
+            }
+          },
+          "sectors": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "buyers": {
+            "$ref": "#/components/schemas/Paginated"
+          },
+          "table_cap": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "supplier"
+        ]
+      },
+      "SectorDetail": {
+        "description": "Sector detail (GET /api/v1/sectors/{slug}).",
+        "type": "object",
+        "properties": {
+          "sector": {
+            "type": "object"
+          },
+          "yearly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyPoint"
+            }
+          },
+          "partners": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "buyers",
+                  "suppliers"
+                ]
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "total": {
+                "type": "integer"
+              },
+              "page": {
+                "type": "integer"
+              },
+              "pageSize": {
+                "type": "integer"
+              }
+            }
+          },
+          "table_cap": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sector"
+        ]
+      },
+      "TenderDetail": {
+        "description": "Single award + related awards (GET /api/v1/tenders/{id}).",
+        "type": "object",
+        "properties": {
+          "tender": {
+            "$ref": "#/components/schemas/Award"
+          },
+          "related": {
+            "type": "object",
+            "properties": {
+              "sameTender": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Award"
+                }
+              },
+              "sameBuyer": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Award"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "tender"
+        ]
+      },
+      "SavedList": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "item_count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SavedListsResponse": {
+        "type": "object",
+        "properties": {
+          "lists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SavedList"
+            }
+          }
+        },
+        "required": [
+          "lists"
+        ]
+      },
+      "SavedListDetail": {
+        "type": "object",
+        "properties": {
+          "list": {
+            "$ref": "#/components/schemas/SavedList"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "list",
+          "items"
+        ]
+      },
+      "CreateListRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "RenameRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "AddItemRequest": {
+        "description": "Provide tender_no OR award_id.",
+        "type": "object",
+        "properties": {
+          "tender_no": {
+            "type": "string"
+          },
+          "award_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RemoveItemRequest": {
+        "type": "object",
+        "properties": {
+          "tender_no": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tender_no"
+        ]
+      },
+      "SavedSearch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "object"
+          },
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SavedSearchesResponse": {
+        "type": "object",
+        "properties": {
+          "searches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SavedSearch"
+            }
+          }
+        },
+        "required": [
+          "searches"
+        ]
+      },
+      "SaveSearchRequest": {
+        "description": "kind:'atlas' normalizes to the unified-search shape; omit for a legacy Explorer filter set.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "object"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "atlas"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  "x-mcp-tools": [
+    {
+      "name": "whoami",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/whoami",
+      "description": "Self-introspection: resolve the caller's identity + entitlement + granted scopes. Returns {subject, type, active, plan, scopes, export_cap}. Works even when inactive (active:false) so an agent can verify auth and decide whether to pay before doing work."
+    },
+    {
+      "name": "search_awards",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/awards",
+      "description": "Search awarded GeBIZ tenders (filters: q, agency, supplier, category, year, amount_min, amount_max)."
+    },
+    {
+      "name": "get_supplier",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/suppliers/{slug}",
+      "description": "All awards for one supplier (by display-name match)."
+    },
+    {
+      "name": "get_agency",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/buyers/{slug}",
+      "description": "All awards for one agency (by slug or display-name match)."
+    },
+    {
+      "name": "export",
+      "scope": "data:export",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/awards.csv",
+      "description": "Export a filtered award set as CSV."
+    },
+    {
+      "name": "get_buyer",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/buyers/{slug}",
+      "description": "Buyer (agency) detail by slug: summary stats, yearly spend trend, sector breakdown, and top suppliers."
+    },
+    {
+      "name": "get_buyer_detail",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/buyers/{slug}",
+      "description": "Alias of get_buyer (back-compat). Buyer (agency) detail by slug: summary stats, yearly spend trend, sector breakdown, and top suppliers."
+    },
+    {
+      "name": "get_supplier_detail",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/suppliers/{slug}",
+      "description": "Supplier detail by slug: summary stats, yearly awarded trend, sector breakdown, and top buyers."
+    },
+    {
+      "name": "get_tender",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/tenders/{id}",
+      "description": "Single tender (award) detail by numeric award_id OR public tender page id, with related awards (same tender / same buyer)."
+    },
+    {
+      "name": "get_sector",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/sectors/{slug}",
+      "description": "Sector detail by slug: summary stats, yearly trend, and active partners (kind=buyers|suppliers)."
+    },
+    {
+      "name": "search",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/search",
+      "description": "Faceted full-text search over one collection (scope=tenders|buyers|suppliers|sectors): filters q, country, sector, type, status, year_min/max, amount_min/max; paginated (page, per_page â¤ 50). Returns {hits, found, page, per_page, facets}."
+    },
+    {
+      "name": "list_buyers",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/buyers",
+      "description": "Top buyers (agencies) by total spend."
+    },
+    {
+      "name": "list_suppliers",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/suppliers",
+      "description": "Top suppliers by total awarded."
+    },
+    {
+      "name": "list_sectors",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/sectors",
+      "description": "The curated sector taxonomy (slug + name)."
+    },
+    {
+      "name": "get_lists",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists",
+      "description": "List every saved award list the caller (x-api-key owner) can see. Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "create_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists",
+      "description": "Create a new saved award list (personal). Body: name. Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "get_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists/{id}",
+      "description": "One saved list with paginated items joined to award data (description/buyer/supplier/amount/date). Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "rename_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists/{id}",
+      "description": "Rename a saved list. Body: id, name. Requires a user API key (creator or workspace owner).",
+      "requires_user_key": true
+    },
+    {
+      "name": "delete_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists/{id}",
+      "description": "Delete a saved list (and its items). Body: id. Requires a user API key (creator or workspace owner).",
+      "requires_user_key": true
+    },
+    {
+      "name": "add_to_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists/{id}/items",
+      "description": "Add a tender to a saved list. Body: id (list id) + tender_no OR award_id. Idempotent. Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "remove_from_list",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/lists/{id}/items",
+      "description": "Remove a tender from a saved list. Body: id (list id) + tender_no. Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "get_saved_searches",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/saved-searches",
+      "description": "List every saved search the caller (x-api-key owner) can see (personal + shared workspace). Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "save_search",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/saved-searches",
+      "description": "Save a search under a name. Body: name, query (filter set), kind? ('atlas' â unified-search shape, else legacy Explorer filters). Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "get_saved_search",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/saved-searches/{id}",
+      "description": "One saved search by id (visible to the caller, else not_found). Requires a user API key.",
+      "requires_user_key": true
+    },
+    {
+      "name": "rename_saved_search",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/saved-searches/{id}",
+      "description": "Rename a saved search. Body: id, name. Requires a user API key (creator or workspace owner).",
+      "requires_user_key": true
+    },
+    {
+      "name": "delete_saved_search",
+      "scope": "data:read",
+      "endpoint": "/api/mcp",
+      "rest_endpoint": "/api/v1/saved-searches/{id}",
+      "description": "Delete a saved search. Body: id. Requires a user API key (creator or workspace owner).",
+      "requires_user_key": true
+    },
+    {
+      "name": "pay",
+      "scope": "billing:pay",
+      "endpoint": "/api/v1/pay",
+      "rest_endpoint": "/api/v1/pay",
+      "description": "Pay autonomously with a Stripe payment-method token to unlock data access (no checkout page)."
+    }
+  ],
+  "x-cli": {
+    "package": "getbeton/selltostate-cli",
+    "binary": "selltostate",
+    "install": "git clone https://github.com/getbeton/selltostate-cli (not published to npm)",
+    "auth": "selltostate auth login  (verifies via /whoami, stores an x-api-key at ~/.config/selltostate/config.json, mode 0600). Override with --api-key / --api-url or STS_API_KEY / STS_API_URL.",
+    "formats": [
+      "table",
+      "json",
+      "csv"
+    ],
+    "exit_codes": {
+      "0": "success",
+      "1": "generic/network error",
+      "2": "unauthorized (401)",
+      "3": "payment required (402)",
+      "4": "rate limited (429)",
+      "64": "usage error"
+    },
+    "commands": [
+      {
+        "command": "auth login|status|logout",
+        "endpoint": "/api/v1/whoami",
+        "note": "Store/verify/forget the API key."
+      },
+      {
+        "command": "whoami",
+        "endpoint": "/api/v1/whoami",
+        "note": "Auth + entitlement + scopes + export cap."
+      },
+      {
+        "command": "search <q> [--scope --sector --country --type --status --year-min --year-max --amount-min --amount-max --page --per-page]",
+        "endpoint": "/api/v1/search"
+      },
+      {
+        "command": "awards [--q --agency --supplier --category --year --amount-min --page --per-page]",
+        "endpoint": "/api/v1/awards"
+      },
+      {
+        "command": "get buyer|supplier|tender|sector <id> [--page --kind]",
+        "endpoint": "/api/v1/{buyers|suppliers|tenders|sectors}/<id>"
+      },
+      {
+        "command": "sectors",
+        "endpoint": "/api/v1/sectors"
+      },
+      {
+        "command": "suppliers [--limit]",
+        "endpoint": "/api/v1/suppliers"
+      },
+      {
+        "command": "buyers [--limit]",
+        "endpoint": "/api/v1/buyers"
+      },
+      {
+        "command": "lists ls|create|show|add|rm|rename|delete",
+        "endpoint": "/api/v1/lists*",
+        "note": "Requires a user API key."
+      },
+      {
+        "command": "saved-searches ls|save|show|rename|delete",
+        "endpoint": "/api/v1/saved-searches*",
+        "note": "Requires a user API key."
+      },
+      {
+        "command": "export [filters] [-o file]",
+        "endpoint": "/api/v1/awards.csv"
+      },
+      {
+        "command": "price",
+        "endpoint": "/api/v1/price"
+      },
+      {
+        "command": "pay [--token --customer]",
+        "endpoint": "/api/v1/pay"
+      }
+    ]
+  },
+  "x-api-key-prefix": "sts_"
+}

@@ -1,0 +1,451 @@
+# Sell to State — Government Contracts Data API (v0.4.0)
+
+> Programmatic, agent-native, and CLI access to normalized government procurement award data. The current award count and country count are on https://selltostate.com. REST, MCP, and the official selltostate CLI stay at parity.
+
+This is the machine-readable index for the API reference. The full interactive reference is at https://docs.selltostate.com/ and the raw OpenAPI 3.1 spec at https://docs.selltostate.com/openapi.json.
+
+## Overview
+
+Programmatic access to government procurement award data published on [selltostate.com](https://selltostate.com). The current award count and country count are on that page. This document does not freeze a count. Built for analysts, vendors, and **AI agents**.
+
+- Reference (interactive): https://docs.selltostate.com/
+- OpenAPI 3.1 spec (raw JSON): https://docs.selltostate.com/openapi.json
+- Full text bundle: https://docs.selltostate.com/llms-full.txt
+
+## Base URL
+
+Primary base URL: `https://app.selltostate.com`
+- `https://api.selltostate.com` — Dedicated machine-API host (GA, coming soon) — not yet deployed; do not target until announced. Use https://app.selltostate.com today.
+
+## Authentication
+
+All data endpoints are gated per subject (`user:<id>` for API keys, `client:<id>` for agents). Two working credential types resolve to one entitlement check:
+
+- API key (humans / backends): send header `x-api-key: sts_…`. Create one in the dashboard under Account → API keys.
+- Machine client (autonomous agents): self-register via RFC 7591 Dynamic Client Registration at `POST /api/oidc/register`, then send `Authorization: Bearer client:<client_id>`.
+- OAuth 2.1 (authorization-code + token endpoints, the `OAuth2` scheme in the spec) is on the roadmap; today present the issued client id directly as `Bearer client:<id>`.
+
+## Endpoints
+
+### Data
+
+Search and export awarded government tenders. Requires an active subscription (else 402).
+
+- `GET /api/v1/awards` — Search awarded government tenders
+- `GET /api/v1/awards.csv` — Export awarded tenders as CSV
+- `GET /api/v1/whoami` — Self-introspection — auth, entitlement & scopes
+- `GET /api/v1/search` — Faceted full-text search (one collection)
+- `GET /api/v1/buyers` — Top buyers by spend
+- `GET /api/v1/buyers/{slug}` — Buyer (agency) detail
+- `GET /api/v1/suppliers` — Top suppliers by awarded total
+- `GET /api/v1/suppliers/{slug}` — Supplier detail
+- `GET /api/v1/sectors` — Sector taxonomy
+- `GET /api/v1/sectors/{slug}` — Sector detail
+- `GET /api/v1/tenders/{id}` — Single award (tender) detail
+
+### Billing
+
+Live pricing and autonomous (agent) payment.
+
+- `GET /api/v1/price` — Live subscription price
+- `POST /api/v1/pay` — Activate a subscription autonomously (agent payment)
+
+### Agents & MCP
+
+Self-registration (DCR) and the MCP-over-HTTP tool server for AI agents.
+
+- `POST /api/oidc/register` — Dynamic Client Registration (RFC 7591)
+- `POST /api/mcp` — MCP-over-HTTP (JSON-RPC 2.0)
+
+### Discovery
+
+OAuth/MCP discovery metadata (RFC 9728 / RFC 8414).
+
+- `GET /.well-known/oauth-protected-resource` — Protected Resource Metadata (RFC 9728)
+- `GET /.well-known/oauth-authorization-server` — Authorization Server Metadata (RFC 8414)
+
+### Lists
+
+Saved award lists CRUD. Owner-scoped — requires a user x-api-key (OIDC clients get 403).
+
+- `GET /api/v1/lists` — List saved award lists
+- `POST /api/v1/lists` — Create a saved list
+- `GET /api/v1/lists/{id}` — Get a saved list + items
+- `PATCH /api/v1/lists/{id}` — Rename a saved list
+- `DELETE /api/v1/lists/{id}` — Delete a saved list
+- `POST /api/v1/lists/{id}/items` — Add a tender to a list
+- `DELETE /api/v1/lists/{id}/items` — Remove a tender from a list
+
+### Saved Searches
+
+Saved search CRUD. Owner-scoped — requires a user x-api-key (OIDC clients get 403).
+
+- `GET /api/v1/saved-searches` — List saved searches
+- `POST /api/v1/saved-searches` — Save a search
+- `GET /api/v1/saved-searches/{id}` — Get a saved search
+- `PATCH /api/v1/saved-searches/{id}` — Rename a saved search
+- `DELETE /api/v1/saved-searches/{id}` — Delete a saved search
+
+## Subscriptions & the 402 paywall
+
+Until a subject has an active subscription, every data call returns `402 Payment Required` with a JSON body carrying a human `payment_link` (hosted Stripe Checkout) and, for agents, a `machine_payment` affordance (`POST /api/v1/pay`). A `WWW-Authenticate` header echoes both paths. Read the live price (public, no auth) at `GET /api/v1/price`. Pay autonomously by posting a Stripe payment-method token to `POST /api/v1/pay`; the next data call then returns `200`.
+
+## Pagination, caps & rate limits
+
+- Pagination: `page` + `page_size`; responses echo `total`, `page`, `pageSize`.
+- Plan caps: 20 rows/page & export on trial, 5,000 on paid — enforced on JSON and CSV.
+- Rate limits: 120 data calls/min per credential (per IP for anonymous); 10 client registrations/hour/IP. Over the limit → `429` + `Retry-After`.
+
+## AI agents (MCP) & discovery
+
+The API is itself an MCP server at `POST /api/mcp` (JSON-RPC 2.0). List tools with `{"method":"tools/list"}` (open, no auth); call a tool with `tools/call` and a credential. Tools: `search_awards`, `get_supplier`, `get_agency`, `export`, `pay`. Discovery metadata:
+
+- Protected Resource Metadata (RFC 9728): `https://app.selltostate.com/.well-known/oauth-protected-resource`
+- Authorization Server Metadata (RFC 8414): `https://app.selltostate.com/.well-known/oauth-authorization-server`
+
+## Links
+
+- API reference: https://docs.selltostate.com/
+- OpenAPI spec: https://docs.selltostate.com/openapi.json
+- Website: https://selltostate.com
+- Support: support@selltostate.com
+- Dashboard: https://app.selltostate.com
+
+---
+
+# Full API narrative
+
+# Sell to State Data API
+
+Programmatic access to government procurement award data published on [selltostate.com](https://selltostate.com). The current award count and country count are on that page. This document does not freeze a count. Built for analysts, vendors, and **AI agents**.
+
+The same data behind the public [selltostate.com](https://selltostate.com) site and the [Explorer](https://app.selltostate.com/explorer), available as JSON, CSV, and an **MCP server** your AI assistant can call directly.
+
+## Base URL
+
+```
+https://app.selltostate.com
+```
+
+> The API is served from `https://app.selltostate.com` at the documented paths — use this host today. A dedicated `https://api.selltostate.com` machine-API host is planned for GA but is **not yet deployed** (it currently returns 404); do not target it until it is announced.
+
+## 60-second quickstart
+
+1. Create a free account at [app.selltostate.com](https://app.selltostate.com) and start a subscription (or trial).
+2. Generate an API key under **Account → API keys** (`app.selltostate.com/account/keys`). It is shown **once** — store it.
+3. Call the API:
+
+```bash
+curl -s https://app.selltostate.com/api/v1/awards?q=cybersecurity&page_size=5 \
+  -H "x-api-key: sts_xxxxxxxx"
+```
+
+Without an active subscription every data call returns **`402 Payment Required`** with a `payment_link` (and, for agents, a `machine_payment` affordance) — see **Subscriptions & the paywall** below.
+
+## Authentication
+
+Two credential types, both resolved to one entitlement check:
+
+| Type | Header | Who | Get one |
+|---|---|---|---|
+| **API key** | `x-api-key: sts_…` | Humans / your backend | Dashboard → Account → API keys |
+| **Machine client** | `Authorization: Bearer client:<client_id>` | Autonomous agents | Self-register via DCR (`POST /api/oidc/register`) |
+
+- API keys are `sts_` + 48 hex chars, shown once, stored only as a SHA-256 hash, and revocable from the dashboard.
+- Machine clients self-register with no human in the loop (RFC 7591). A freshly registered client has **zero data scopes** until it subscribes — registration returns a `payment_link`, and the client can also pay autonomously via `POST /api/v1/pay`.
+- A full OAuth 2.1 authorization-code + token flow (the `OAuth2` scheme below) is on the roadmap; today, present the issued `client_id` as `Authorization: Bearer client:<client_id>`.
+
+## Subscriptions & the paywall
+
+Data is gated by a single flat subscription (read live pricing at `GET /api/v1/price`). Until the caller's subject (`user:<id>` for a key, `client:<id>` for an agent) is active, **every data endpoint returns `402`**:
+
+```json
+{
+  "error": "payment_required",
+  "message": "An active subscription is required to access award data.",
+  "payment_link": "https://app.selltostate.com/checkout",
+  "plan": "data-monthly",
+  "machine_payment": {
+    "endpoint": "https://app.selltostate.com/api/v1/pay",
+    "method": "POST",
+    "accepts": ["payment_method_token", "customer"],
+    "scopes_granted": ["data:read", "data:export"]
+  },
+  "price": "$49/mo",
+  "currency": "usd"
+}
+```
+
+The `402` also carries a header advertising both paths:
+
+```
+WWW-Authenticate: Bearer realm="data", charge="…/checkout", charge_automated="…/api/v1/pay"
+```
+
+- **Humans** open `payment_link` (hosted Stripe Checkout).
+- **Agents** `POST /api/v1/pay` with a Stripe payment-method token and are charged off-session — no browser. On success the agent's very next data call returns `200`.
+
+**Plans & caps:** a 2-day trial is capped at **20 rows** per export/page; a paid plan returns up to **5,000 rows**. v1 entitlement is all-or-nothing — an active subscription grants every data scope.
+
+## Scopes
+
+`data:read` (read awards), `data:export` (CSV export), `data:bulk` (bulk access). In v1 an active subscription grants all three.
+
+## Pagination
+
+List endpoints take `page` (default 1) and `page_size` (default 100; hard-capped by your plan — 20 trial / 5,000 paid). Responses echo `total`, `page`, and `pageSize`.
+
+## Rate limits
+
+- **Data calls:** 120 requests/minute per credential (per API key or machine client; anonymous/`402` traffic is limited per source IP).
+- **Client registration:** 10 registrations/hour per IP.
+
+Over the limit → `429` with a `Retry-After` (seconds) header.
+
+## Using the API from an AI agent (MCP)
+
+This API is a **Model Context Protocol (MCP) server**. Point any MCP-capable client (Claude Desktop, Claude Code, Cursor, your own agent) at the streamable-HTTP endpoint and it can search and export government awards on its own — including self-registering and paying for access with no human in the loop.
+
+**Endpoint**
+
+```
+https://app.selltostate.com/api/mcp
+```
+
+### Connect flow (DCR + OAuth)
+
+The server advertises its auth the standard way, so spec-compliant clients wire themselves up automatically:
+
+1. **Discover.** The client reads `GET /.well-known/oauth-protected-resource` (RFC 9728) to learn the resource and its authorization server, then `GET /.well-known/oauth-authorization-server` (RFC 8414) for the issuer, endpoints, PKCE support, and scopes (`data:read`, `data:export`, `data:bulk`).
+2. **Register.** With no pre-shared credential, the client self-registers via RFC 7591 Dynamic Client Registration: `POST /api/oidc/register` returns a `client_id` (zero data scopes) plus a `payment_link`.
+3. **Authenticate.** Present the issued client as `Authorization: Bearer client:<client_id>` on every MCP call. (`tools/list` is open and needs no credential; `tools/call` resolves the machine principal.) The full OAuth 2.1 authorization-code + token exchange is on the roadmap; the `Bearer client:<id>` form works today.
+4. **Subscribe.** Until the client's subject is entitled, every `tools/call` returns the same **`402`** body as REST (see *Subscriptions & the paywall*) — carrying both a human `payment_link` and the agent-native `machine_payment` affordance. The agent calls the `pay` tool (`POST /api/v1/pay`) with a Stripe payment-method token, is charged off-session, and its very next `tools/call` returns data.
+
+### Tool catalog
+
+`tools/list` returns **26 tools** (as of 0.4.0), each mirroring a REST endpoint 1:1 — search, entity detail, faceted search, lists, and saved searches — plus the autonomous `pay` tool. The full catalog (name · scope · REST endpoint · `requires_user_key`) is the machine-readable **`x-mcp-tools`** extension on this document; treat that as the source of truth. Highlights: `whoami` (ungated self-introspection), `search` (faceted), `get_buyer`/`get_supplier_detail`/`get_sector`/`get_tender` (entity detail; `get_buyer_detail` is a back-compat alias of `get_buyer`), and the owner-scoped `*_list`/`*_saved_search` tools that require a user `x-api-key` (an OIDC client token gets a `requires_user_key` result, mirroring the REST `403`).
+
+### Raw JSON-RPC (manual test)
+
+List the tools (open, no auth):
+
+```bash
+curl -s https://app.selltostate.com/api/mcp \
+  -H "content-type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Call a tool (needs an entitled principal, else `402`):
+
+```bash
+curl -s https://app.selltostate.com/api/mcp \
+  -H "content-type: application/json" \
+  -H "Authorization: Bearer client:<client_id>" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_awards","arguments":{"q":"cybersecurity","year":2024}}}'
+```
+
+### Example agent prompts
+
+Once the connector is attached, a user can simply ask:
+
+- *"Search Sell to State for cybersecurity awards in 2024 over S$1M and summarise the top 5 suppliers."*
+- *"Use the Sell to State tools to pull every award won by the Ministry of Education this year and export them as CSV."*
+- *"Which suppliers does a government buyer purchase construction services from? Use get_agency on the relevant buyer."*
+
+If the agent hits a `402`, the affordance is self-explanatory: it can present the `payment_link` to the user, or — when authorised to spend — call `pay` and continue without interruption.
+
+## Data notes
+
+Award amounts are in their **local award currency**. The subscription **price** is in USD. `description` is the tender description, truncated to 240 chars in list/JSON responses.
+
+## Support
+
+[support@selltostate.com](mailto:support@selltostate.com) · status & changelog below.
+
+---
+
+## What's new in 0.4.0 — REST · MCP · CLI parity
+
+0.4.0 closes the gap between the three machine surfaces so **every capability is reachable the same way from REST, the MCP server, and the official CLI** (`@data-atlas/cli` → the `selltostate` binary). Same auth (`x-api-key` or `Bearer client:<id>`), same paywall, same entitlement caps.
+
+### New REST endpoints (all under `/api/v1`, same machine paywall as `/awards`)
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/whoami` | Self-introspection: `{subject, type, active, plan, scopes, export_cap}`. **No 402** — a valid-but-unentitled key returns `200` with `active:false` so an agent can decide to pay *before* doing work. Missing credential → `401`. |
+| `GET /api/v1/search` | Faceted full-text (Typesense) search over one `scope` (`tenders\|buyers\|suppliers\|sectors`): `{hits, found, page, per_page, facets}`. Search-budget rate limit (300/min). |
+| `GET /api/v1/buyers` · `GET /api/v1/buyers/{slug}` | Top buyers by spend · buyer detail (summary, yearly trend, sector breakdown, top suppliers). |
+| `GET /api/v1/suppliers` · `GET /api/v1/suppliers/{slug}` | Top suppliers by awarded total · supplier detail (summary, yearly trend, sectors, top buyers). |
+| `GET /api/v1/sectors` · `GET /api/v1/sectors/{slug}` | Curated sector taxonomy · sector detail (summary, yearly trend, active partners via `?kind=buyers\|suppliers`). |
+| `GET /api/v1/tenders/{id}` | Single award by numeric `award_id` **or** public tender page id, with related awards. |
+| `GET/POST /api/v1/lists` · `GET/PATCH/DELETE /api/v1/lists/{id}` · `POST/DELETE /api/v1/lists/{id}/items` | Saved award **lists** CRUD. **Owner-scoped: requires an `x-api-key` (user) credential** — OIDC client tokens get `403` (a list belongs to a real user). |
+| `GET/POST /api/v1/saved-searches` · `GET/PATCH/DELETE /api/v1/saved-searches/{id}` | Saved **searches** CRUD. Same owner-scoped rule as lists. |
+
+Entity-detail and partner tables are capped to your plan's row cap on trial keys (`table_cap` echoes the applied cap).
+
+### MCP tool catalog (24 tools — `x-mcp-tools` on this document is the machine-readable source of truth)
+
+Every REST capability above has a matching MCP tool. `get_buyer` is canonical; `get_buyer_detail` is a kept back-compat alias. Lists/saved-searches tools require a user `x-api-key` (an OIDC client gets a `forbidden`/`requires_user_key` result, mirroring the REST `403`). `whoami` is ungated.
+
+### Official CLI — `selltostate`
+
+The `selltostate` binary is the official CLI. Clone https://github.com/getbeton/selltostate-cli (it is not on npm). It is a thin wrapper over this exact REST surface, 1:1 per command, with `--format table|json|csv`. Authenticate once with `selltostate auth login` (stores an `x-api-key` at `~/.config/selltostate/config.json`, mode `0600`) or pass `STS_API_KEY`. See the `x-cli` extension on this document for the full command map, and the [CLI page](https://selltostate.com/cli/) on the marketing site.
+
+```bash
+selltostate auth login                 # verify + persist your x-api-key via /whoami
+selltostate whoami                     # {subject, active, plan, scopes, export_cap}
+selltostate search "cybersecurity" --scope tenders --year-min 2023
+selltostate get buyer ministry-of-education
+selltostate export --supplier ACME -o awards.csv
+```
+
+---
+
+# Operations (detail)
+
+## GET /api/v1/awards
+**Search awarded government tenders**
+
+Paginated, filterable query over the full GeBIZ award set, ordered by awarded amount (desc). Requires an active subscription — otherwise returns `402` with a payment link. Row count per page is capped by your plan (20 trial / 5,000 paid).
+
+**Note:** `amount_max` is honored by the MCP `search_awards`/`export` tools; the REST endpoint currently filters on `amount_min` only (`amount_max` parity fix pending GA).
+
+## GET /api/v1/awards.csv
+**Export awarded tenders as CSV**
+
+Same filters as `searchAwards`, returned as `text/csv` (attachment `selltostate-awards.csv`). Columns: `tender_no,supplier,agency,category,awarded_amt,published_at,awarded_at,description`. Row count capped by plan (20 trial / 5,000 paid). Requires an active subscription; un-entitled callers are redirected to `/checkout`.
+
+## GET /api/v1/price
+**Live subscription price**
+
+Public. Returns the active Stripe subscription price (USD), resolved live by lookup key, with a graceful fallback if Stripe is unreachable. No auth required.
+
+## POST /api/v1/pay
+**Activate a subscription autonomously (agent payment)**
+
+Agent-native payment. Present a Stripe payment-method token (`pm_…`) or an existing `customer` (`cus_…`) you control; the subscription is created server-side, off-session — no hosted Checkout page. On success the caller's subject-keyed entitlement flips active and the next data call returns `200`. A decline returns `402` (retryable) echoing `decline_code` and the same `machine_payment` affordance. Requires a machine credential (API key or `Bearer client:`).
+
+## POST /api/oidc/register
+**Dynamic Client Registration (RFC 7591)**
+
+Autonomous, zero-scope client registration for agents. Returns client credentials with **no data scopes** plus a `payment_link` whose Checkout activates exactly this client. Rate-limited 10/hour/IP. After paying (hosted link or `POST /api/v1/pay`), present `Authorization: Bearer client:<client_id>` on data calls.
+
+## POST /api/mcp
+**MCP-over-HTTP (JSON-RPC 2.0)**
+
+Model Context Protocol server. Methods: `tools/list` (open catalog) and `tools/call` (gated by subscription). `tools/call` resolves the machine principal (`x-api-key` or `Bearer client:`) and returns `402` if missing or un-entitled. As of 0.4.0 the catalog is **26 tools** at full REST parity (search, entity detail, faceted search, lists, saved searches) — owner-scoped list/saved-search tools require a user `x-api-key`. See `x-mcp-tools` for the catalog.
+
+## GET /.well-known/oauth-protected-resource
+**Protected Resource Metadata (RFC 9728)**
+
+Tells MCP/OAuth clients which authorization server and scopes apply to this resource. Origin-relative.
+
+## GET /.well-known/oauth-authorization-server
+**Authorization Server Metadata (RFC 8414)**
+
+Issuer, registration/authorize/token/jwks endpoints, PKCE methods, and supported scopes. The token endpoint implements the authorization_code + refresh_token grants (PKCE mandatory); there is no client_credentials token grant today — autonomous agents use the `Authorization: Bearer client:<client_id>` machine shim returned by DCR.
+
+## GET /api/v1/whoami
+**Self-introspection — auth, entitlement & scopes**
+
+Resolve the *calling* credential's identity, entitlement and granted scopes. **Deliberately different from the data paywall:** a valid-but-unentitled credential returns `200` with `active:false` (so an agent/CLI can decide to pay *before* doing work); a missing/invalid credential returns `401` (not `402`). Granted scopes are all data scopes when active, else empty (v1 is all-or-nothing). Shares the standard 120/min per-caller rate limit.
+
+## GET /api/v1/search
+**Faceted full-text search (one collection)**
+
+Faceted Typesense search over a single `scope` collection. Returns hits, total `found`, pagination, and `facets` (counts per facet value). Uses the **search budget** rate limit (300/min) shared with the public `/api/search` route. Behind the same machine paywall as `/awards` — no human-session fallback.
+
+## GET /api/v1/buyers
+**Top buyers by spend**
+
+Top buying agencies ranked by total awarded spend. `?limit` (default 50, max 500). Trial keys are row-capped (`table_cap`).
+
+## GET /api/v1/buyers/{slug}
+**Buyer (agency) detail**
+
+Full buyer profile: header summary, yearly spend trend, sector breakdown, and a paginated top-suppliers table (`?sup_page`). `404` when the slug is unknown.
+
+## GET /api/v1/suppliers
+**Top suppliers by awarded total**
+
+Top suppliers ranked by total awarded value. `?limit` (default 50, max 500). Trial keys are row-capped.
+
+## GET /api/v1/suppliers/{slug}
+**Supplier detail**
+
+Full supplier profile: header summary, yearly awarded trend, sector breakdown, and a paginated top-buyers table (`?buyer_page`). `404` when the slug is unknown.
+
+## GET /api/v1/sectors
+**Sector taxonomy**
+
+The curated sector taxonomy (slug + name). Small reference list — no row cap.
+
+## GET /api/v1/sectors/{slug}
+**Sector detail**
+
+Sector profile: header summary, yearly trend, and active partners. `?kind=buyers|suppliers` (default buyers) selects the partner table; `?page` paginates it. `404` when the slug is unknown.
+
+## GET /api/v1/tenders/{id}
+**Single award (tender) detail**
+
+One award resolved by **numeric `award_id` OR public tender page id**, plus related awards (same tender / same buyer). Related lists are pre-capped; no trial row cap applies. `404` when unknown.
+
+## GET /api/v1/lists
+**List saved award lists**
+
+Every saved award list the caller can see. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## POST /api/v1/lists
+**Create a saved list**
+
+Create a personal saved award list. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## GET /api/v1/lists/{id}
+**Get a saved list + items**
+
+One list with its items joined to award data (paginated `?page`/`?page_size`, ≤100). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## PATCH /api/v1/lists/{id}
+**Rename a saved list**
+
+Rename a list (creator or workspace owner). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## DELETE /api/v1/lists/{id}
+**Delete a saved list**
+
+Delete a list and its items. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## POST /api/v1/lists/{id}/items
+**Add a tender to a list**
+
+Add a tender by `tender_no` **or** `award_id`. Idempotent. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## DELETE /api/v1/lists/{id}/items
+**Remove a tender from a list**
+
+Remove a tender by `tender_no`. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## GET /api/v1/saved-searches
+**List saved searches**
+
+Every saved search the caller can see (personal ∪ workspaces). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## POST /api/v1/saved-searches
+**Save a search**
+
+Persist a search under a name. `kind:"atlas"` normalizes to the unified-search shape; a legacy Explorer filter set is stored as-is. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## GET /api/v1/saved-searches/{id}
+**Get a saved search**
+
+One saved search by id (visible to caller, else `404`). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## PATCH /api/v1/saved-searches/{id}
+**Rename a saved search**
+
+Rename a saved search (creator or workspace owner). **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
+
+## DELETE /api/v1/saved-searches/{id}
+**Delete a saved search**
+
+Delete a saved search. **Owner-scoped:** requires an `x-api-key` (user) credential. OIDC client (`Bearer client:`) tokens get `403` — a saved list/search belongs to a real user account.
