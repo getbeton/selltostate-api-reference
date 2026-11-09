@@ -4,7 +4,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url);
-const allowed = new Set(["openapi.json", "api-guide.md", "llms.txt", "llms-full.txt", "README.md", "LICENSE", "header.png", "test"]);
+const allowed = new Set(["openapi.json", "api-guide.md", "llms.txt", "llms-full.txt", "README.md", "LICENSE", "SECURITY.md", "header.png", "test"]);
 
 test("file set is public only", () => {
   for (const name of readdirSync(root)) {
